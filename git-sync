@@ -214,6 +214,7 @@ get_autocommit_msg() {
 	if [ "" == "$commit_msg" ]; then
 		commit_msg=${DEFAULT_AUTOCOMMIT_MSG}
 	fi
+	commit_msg=$(eval "echo \"$commit_msg\"")
 	echo $commit_msg
 }
 
