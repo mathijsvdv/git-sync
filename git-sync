@@ -200,14 +200,53 @@ sync_state()
 # exit, issue warning if not in sync
 exit_assuming_sync() {
     if [ "equal" == "$(sync_state)" ] ; then
-	__log_msg "In sync, all fine."
-	exit 0;
+		__log_msg "In sync, all fine."
+		exit 0;
     else
-	__log_msg "Synchronization FAILED! You should definitely check your repository carefully!"
-	__log_msg "(Possibly a transient network problem? Please try again in that case.)"
-	exit 3
+		__log_msg "Synchronization FAILED! You should definitely check your repository carefully!"
+		__log_msg "(Possibly a transient network problem? Please try again in that case.)"
+		exit 3
     fi
 }
+
+get_autocommit_msg() {
+	commit_msg="$(git config --get branch.$branch_name.syncCommitMsg)"
+	if [ "" == "$commit_msg" ]; then
+		commit_msg=${DEFAULT_AUTOCOMMIT_MSG}
+	fi
+	echo $commit_msg
+}
+
+get_pr_title() {
+	echo "$(get_autocommit_msg)"
+}
+
+get_pr_body() {
+	echo "$(get_autocommit_msg)"
+}
+
+create_pr_from_branch() {
+	git checkout -b "git-sync-rebase-$(date +%Y%m%dT%H%M%S)"
+	git push -u $remote_name HEAD
+	if [ $? == 0 ]; then
+		pr_title="$(get_pr_title)"
+		pr_body="$(get_pr_body)"
+		gh pr create --title "$pr_title" --body "$pr_body"
+		if [ $? == 0 ]; then
+			__log_msg "Please resolve the conflicts and merge the pull request with title '$pr_title'. Then run git-sync again."
+		else
+			__log_msg "Unable to create pull request. Likely a connection failure."
+			return 3
+		fi
+	else
+	    __log_msg "git push returned non-zero. Likely a connection failure."
+	    return 3
+	fi
+	
+	git checkout $branch_name
+	return 0
+}
+
 
 #
 #        Here git-sync actually starts
@@ -314,12 +353,8 @@ if [ ! -z "$(local_changes)" ]; then
         autocommit_cmd=${DEFAULT_AUTOCOMMIT_CMD}
     fi
 
-    commit_msg="$(git config --get branch.$branch_name.syncCommitMsg)"
-    if [ "" == "$commit_msg" ]; then
-      commit_msg=${DEFAULT_AUTOCOMMIT_MSG}
-    fi
-    autocommit_cmd=$(echo "$autocommit_cmd" | sed "s/%message/$commit_msg/")
-
+    autocommit_msg="$(get_autocommit_msg)"
+    autocommit_cmd=$(echo "$autocommit_cmd" | sed "s/%message/$autocommit_msg/")
     __log_msg "Committing local changes using ${autocommit_cmd}"
     eval $autocommit_cmd
 
@@ -376,9 +411,18 @@ case "$(sync_state)" in
 	    git push $remote_name $branch_name:$branch_name
 	    exit_assuming_sync
 	else
-	    __log_msg "Rebasing failed, likely there are conflicting changes. Resolve them and finish the rebase before repeating git-sync."
-	    exit 1
+	    __log_msg "Rebasing failed, likely there are conflicting changes. Making a pull request with the changes so that the conflicts can be resolved manually."
+		git rebase --abort
+		create_pr_from_branch
+		pr_status=$?
+		__log_msg "Resetting to $remote_name/$branch_name so that we can continue."
+		git reset --hard $remote_name/$branch_name
+		if [ $pr_status == 0 ]; then
+			exit_assuming_sync
+		else
+			__log_msg "Pull request creation failed. Exiting."
+			exit $pr_status
+		fi
 	fi
-	# TODO: save master, if rebasing fails, make a branch of old master
 	;;
 esac
